@@ -61,11 +61,38 @@ def _build_synthetic_interactions(post_id: str, n: int = 20) -> pd.DataFrame:
 
 
 def _behavioral_score(features: Dict) -> float:
+    """Compute a graduated behavioral anomaly score based on actual metrics."""
     score = 0.0
-    for key in ["spread_speed", "early_burst", "synchronization", "user_diversity", "behavioral_entropy"]:
+    weights = {
+        "spread_speed": 25,
+        "early_burst": 20,
+        "synchronization": 20,
+        "user_diversity": 15,
+        "behavioral_entropy": 20,
+    }
+    for key, max_pts in weights.items():
         sub = features.get(key, {})
-        if isinstance(sub, dict) and sub.get("is_abnormal"):
-            score += 20
+        if isinstance(sub, dict):
+            if sub.get("is_abnormal"):
+                # Graduated: stronger anomaly value → more points
+                val = sub.get("value", 0)
+                if key == "spread_speed":
+                    # Faster spread → higher score (val is avg gap in seconds)
+                    intensity = max(0, min(1, (60 - val) / 60)) if val < 60 else 0
+                elif key == "early_burst":
+                    # Higher burst ratio → higher score
+                    intensity = max(0, min(1, val / 1.0))
+                elif key == "synchronization":
+                    intensity = max(0, min(1, val / 1.0))
+                elif key == "user_diversity":
+                    # Lower diversity → higher score
+                    intensity = max(0, min(1, (0.5 - val) / 0.5)) if val < 0.5 else 0
+                elif key == "behavioral_entropy":
+                    # Lower entropy → higher score
+                    intensity = max(0, min(1, (2.5 - val) / 2.5)) if val < 2.5 else 0
+                else:
+                    intensity = 0.7  # default for unknown keys
+                score += max_pts * max(0.5, intensity)  # At least 50% if flagged
     return min(score, 100.0)
 
 
@@ -148,7 +175,7 @@ def run_detection(
     ml_score = 0.0
     has_ml = False
 
-    if feature_vector and len(feature_vector) == 8:
+    if feature_vector and len(feature_vector) == 11:
         _log(f"\n  [3/4] ML Classifier (RandomForest + Forensics Blend)")
         try:
             classifier = get_classifier()
@@ -229,6 +256,8 @@ def run_detection(
         label = "Likely AI-Generated - Medium Confidence"
     elif confidence >= 40:
         label = "Possibly AI-Generated - Low Confidence"
+    elif confidence >= 20:
+        label = "Uncertain - Insufficient Evidence"
     else:
         label = "Likely Human Content"
 

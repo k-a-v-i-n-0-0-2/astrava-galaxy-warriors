@@ -92,7 +92,7 @@ export const mockReels = [
     {
         id: "reel_test",
         user: mockUsers.currentUser,
-        videoUrl: "/test_video.mp4",
+        videoUrl: "/test_video2.mp4",
         videoOverlayImage: "https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?q=80&w=800&auto=format&fit=crop",
         caption: "Testing my own AI Detection system with the latest upload! 🚀🤖 #Astrava #AIDetection",
         song: "Original Audio - alex_developer",
@@ -108,7 +108,7 @@ export const mockReels = [
      {
         id: "reel_test1",
         user: mockUsers.currentUser,
-        videoUrl: "/test_video2.mp4",
+        videoUrl: "/test_video.mp4",
         videoOverlayImage: "https://images.unsplash.com/photo-1492691527719-9d1e07e534b4?q=80&w=800&auto=format&fit=crop",
         caption: "Testing my own AI Detection system with the latest upload! 🚀🤖 #Astrava #AIDetection",
         song: "Original Audio - alex_developer",

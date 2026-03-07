@@ -172,7 +172,7 @@ class VideoAIAnalyzer:
             anomaly += min(25, std * 150)
             return float(min(100, max(0, anomaly)))
         except:
-            return 50.0
+            return 0.0  # No evidence on failure, not a coin-flip
 
     # ── Forensic Check 2: Expression Symmetry ──────────────────────────────
 
@@ -223,7 +223,7 @@ class VideoAIAnalyzer:
             else:
                 return float(max(0, 25 - (0.85 - avg_sym) * 100))
         except:
-            return 50.0
+            return 0.0
 
     # ── Forensic Check 3: Lip-Sync Coherence ───────────────────────────────
 
@@ -504,26 +504,218 @@ class VideoAIAnalyzer:
 
                 artifact_scores.append(min(100, score))
 
-            return float(np.mean(artifact_scores)) if artifact_scores else 50.0
+            return float(np.mean(artifact_scores)) if artifact_scores else 0.0
         except:
-            return 50.0
+            return 0.0
+
+    # ── Forensic Check 9: Hidden Watermark Detection ──────────────────────
+
+    def check_watermark_artifacts(self, frames: List[np.ndarray]) -> float:
+        """Detect hidden watermarks/steganographic patterns from AI generators.
+        Uses DCT-domain analysis and LSB (Least Significant Bit) plane analysis."""
+        try:
+            watermark_scores = []
+            for frame in frames[:8]:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                gray = cv2.resize(gray, (256, 256)).astype(np.float64)
+
+                # --- DCT domain analysis ---
+                # AI generators often embed watermarks in DCT coefficients
+                dct = cv2.dct(gray)
+                # Check for periodic patterns in mid-frequency DCT coefficients
+                mid_band = dct[32:96, 32:96]
+                dct_energy = np.mean(np.abs(mid_band))
+                dct_std = np.std(np.abs(mid_band))
+                # Ratio of energy to std — watermarked content shows regular patterns
+                dct_regularity = dct_energy / (dct_std + 1e-6)
+
+                # --- LSB plane analysis ---
+                # Extract least significant bit plane
+                lsb = (gray.astype(np.uint8) & 1).astype(np.float64)
+                # True random LSB has ~0.5 mean; steganographic patterns deviate
+                lsb_mean = np.mean(lsb)
+                lsb_deviation = abs(lsb_mean - 0.5)
+                # Block-wise LSB uniformity (watermarks create block patterns)
+                block_size = 16
+                h, w = lsb.shape
+                block_means = []
+                for by in range(0, h - block_size, block_size):
+                    for bx in range(0, w - block_size, block_size):
+                        block_means.append(np.mean(lsb[by:by+block_size, bx:bx+block_size]))
+                lsb_block_std = np.std(block_means) if block_means else 0
+
+                # --- Channel correlation for color frames ---
+                b, g, r = cv2.split(cv2.resize(frame, (256, 256)))
+                # AI watermarks often affect channels non-uniformly
+                bg_corr = np.corrcoef(b.flatten().astype(float), g.flatten().astype(float))[0, 1]
+                gr_corr = np.corrcoef(g.flatten().astype(float), r.flatten().astype(float))[0, 1]
+                corr_diff = abs(bg_corr - gr_corr)
+
+                # Score calculation
+                score = 0
+                # High DCT regularity in mid-band suggests embedded watermark
+                if dct_regularity > 3.0:
+                    score += min(35, (dct_regularity - 3.0) * 10)
+                # LSB deviation from 0.5 suggests manipulation
+                if lsb_deviation > 0.02:
+                    score += min(25, lsb_deviation * 500)
+                # Low block-wise LSB variance = structured pattern
+                if lsb_block_std < 0.08:
+                    score += min(20, (0.08 - lsb_block_std) * 250)
+                # High channel correlation asymmetry
+                if corr_diff > 0.1:
+                    score += min(20, corr_diff * 100)
+
+                watermark_scores.append(min(100, max(0, score)))
+
+            return float(np.mean(watermark_scores)) if watermark_scores else 0.0
+        except:
+            return 0.0
+
+    # ── Forensic Check 10: Error Level Analysis (ELA) ─────────────────────
+
+    def check_ela(self, frames: List[np.ndarray]) -> float:
+        """Error Level Analysis — re-compress frames and measure error uniformity.
+        AI-generated content shows unnaturally uniform error levels."""
+        try:
+            ela_scores = []
+            for frame in frames[:8]:
+                frame_resized = cv2.resize(frame, (256, 256))
+
+                # Encode to JPEG at quality 90, then decode
+                encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+                _, encoded = cv2.imencode('.jpg', frame_resized, encode_params)
+                recompressed = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+
+                # Compute absolute difference (error level)
+                diff = cv2.absdiff(frame_resized, recompressed).astype(np.float64)
+                ela_map = np.mean(diff, axis=2)  # Average across channels
+
+                # --- Statistics of the ELA map ---
+                ela_mean = np.mean(ela_map)
+                ela_std = np.std(ela_map)
+                ela_max = np.max(ela_map)
+                # Coefficient of variation
+                ela_cv = ela_std / (ela_mean + 1e-6)
+
+                # --- Block-wise ELA uniformity ---
+                block_size = 32
+                h, w = ela_map.shape
+                block_energies = []
+                for by in range(0, h - block_size, block_size):
+                    for bx in range(0, w - block_size, block_size):
+                        block_energies.append(np.mean(ela_map[by:by+block_size, bx:bx+block_size]))
+                block_cv = np.std(block_energies) / (np.mean(block_energies) + 1e-6) if block_energies else 1.0
+
+                # --- Spatial entropy of ELA ---
+                ela_hist, _ = np.histogram(ela_map.flatten(), bins=32, density=True)
+                ela_hist = ela_hist[ela_hist > 0]
+                ela_entropy = -np.sum(ela_hist * np.log2(ela_hist + 1e-10))
+
+                # Score calculation
+                score = 0
+                # Very low ELA CV = unnaturally uniform compression (AI-generated)
+                if ela_cv < 0.8:
+                    score += min(35, (0.8 - ela_cv) * 50)
+                # Low block CV = uniform error across blocks (AI)
+                if block_cv < 0.5:
+                    score += min(30, (0.5 - block_cv) * 60)
+                # Low ELA entropy = uniform error distribution (AI)
+                if ela_entropy < 3.0:
+                    score += min(20, (3.0 - ela_entropy) * 10)
+                # Very low max error = too clean (AI)
+                if ela_max < 10:
+                    score += min(15, (10 - ela_max) * 2)
+
+                ela_scores.append(min(100, max(0, score)))
+
+            return float(np.mean(ela_scores)) if ela_scores else 0.0
+        except:
+            return 0.0
+
+    # ── Forensic Check 11: Metadata / Noise Floor Forensics ───────────────
+
+    def check_metadata_forensics(self, frames: List[np.ndarray]) -> float:
+        """Analyze pixel statistics and noise floor for camera-vs-AI signatures.
+        Real cameras produce sensor noise; AI generators produce clean/synthetic noise."""
+        try:
+            meta_scores = []
+            for frame in frames[:8]:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float64)
+                gray = cv2.resize(gray, (256, 256))
+
+                # --- Noise floor estimation (high-pass filter residual) ---
+                blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+                noise = gray - blurred
+                noise_std = np.std(noise)
+                noise_kurtosis = float(stats.kurtosis(noise.flatten()))
+
+                # Real camera noise: Gaussian-like (kurtosis ~0)
+                # AI noise: heavier tails or too clean (kurtosis far from 0)
+                kurtosis_deviation = abs(noise_kurtosis)
+
+                # --- Pixel distribution analysis ---
+                pixel_vals = gray.flatten()
+                pixel_skew = abs(float(stats.skew(pixel_vals)))
+                pixel_kurtosis = abs(float(stats.kurtosis(pixel_vals)))
+
+                # --- Channel noise correlation (color frames) ---
+                b, g, r = cv2.split(cv2.resize(frame, (256, 256)).astype(np.float64))
+                b_noise = b - cv2.GaussianBlur(b, (5, 5), 0)
+                g_noise = g - cv2.GaussianBlur(g, (5, 5), 0)
+                r_noise = r - cv2.GaussianBlur(r, (5, 5), 0)
+
+                # Real camera: correlated sensor noise across channels
+                # AI: independent noise per channel
+                bg_noise_corr = abs(np.corrcoef(b_noise.flatten(), g_noise.flatten())[0, 1])
+                gr_noise_corr = abs(np.corrcoef(g_noise.flatten(), r_noise.flatten())[0, 1])
+                avg_noise_corr = (bg_noise_corr + gr_noise_corr) / 2
+
+                # --- PRNU-like pattern (Photo Response Non-Uniformity) ---
+                # Real cameras leave a consistent noise fingerprint
+                # AI content has no such fingerprint across frames
+                prnu_var = np.var(noise)
+
+                # Score calculation
+                score = 0
+                # Very low noise std = AI-generated (too clean)
+                if noise_std < 2.0:
+                    score += min(25, (2.0 - noise_std) * 15)
+                # High noise kurtosis deviation = non-Gaussian noise (AI)
+                if kurtosis_deviation > 3.0:
+                    score += min(25, (kurtosis_deviation - 3.0) * 5)
+                # Low inter-channel noise correlation = AI
+                if avg_noise_corr < 0.15:
+                    score += min(25, (0.15 - avg_noise_corr) * 200)
+                # Very low PRNU variance = no sensor fingerprint (AI)
+                if prnu_var < 3.0:
+                    score += min(15, (3.0 - prnu_var) * 5)
+                # High pixel skew = unnatural distribution
+                if pixel_skew > 1.5:
+                    score += min(10, (pixel_skew - 1.5) * 10)
+
+                meta_scores.append(min(100, max(0, score)))
+
+            return float(np.mean(meta_scores)) if meta_scores else 0.0
+        except:
+            return 0.0
 
     # ── Main Pipeline ─────────────────────────────────────────────────────
 
     def analyze_video(self, video_path: str) -> Dict[str, float]:
-        """Run all 8 forensic checks and return signal vector + AI probability."""
-        _log("      [FORENSICS] Starting 8-check analysis...")
+        """Run all 11 forensic checks and return signal vector + AI probability."""
+        _log("      [FORENSICS] Starting 11-check analysis...")
         frames = self.extract_frames(video_path, num_frames=15)
 
         if len(frames) == 0:
             _log("      [FORENSICS] No frames extracted")
             return {
-                'ai_probability': 50, 'confidence': 30,
+                'ai_probability': 0, 'confidence': 0,
                 'signals': {}, 'triggered_patterns': ['No visual data found'],
-                'feature_vector': [50]*8
+                'feature_vector': [0]*11
             }
 
-        # Run all 8 checks
+        # Run all 11 checks
         checks = [
             ("facial_consistency", self.check_facial_consistency),
             ("expression_symmetry", self.check_expression_symmetry),
@@ -533,6 +725,9 @@ class VideoAIAnalyzer:
             ("color_anomaly", self.check_color_anomaly),
             ("temporal_coherence", self.check_temporal_coherence),
             ("edge_artifacts", self.check_edge_artifacts),
+            ("watermark_artifacts", self.check_watermark_artifacts),
+            ("ela_analysis", self.check_ela),
+            ("metadata_forensics", self.check_metadata_forensics),
         ]
 
         signals = {}
@@ -552,14 +747,17 @@ class VideoAIAnalyzer:
 
         # Weighted scoring (forensic-only, before ML classifier)
         weights = {
-            'facial_consistency': 0.18,
-            'expression_symmetry': 0.12,
-            'lip_sync': 0.12,
-            'gan_noise': 0.15,
-            'texture_regularity': 0.13,
-            'color_anomaly': 0.10,
-            'temporal_coherence': 0.10,
-            'edge_artifacts': 0.10,
+            'facial_consistency': 0.13,
+            'expression_symmetry': 0.09,
+            'lip_sync': 0.09,
+            'gan_noise': 0.12,
+            'texture_regularity': 0.10,
+            'color_anomaly': 0.07,
+            'temporal_coherence': 0.08,
+            'edge_artifacts': 0.07,
+            'watermark_artifacts': 0.09,
+            'ela_analysis': 0.09,
+            'metadata_forensics': 0.07,
         }
 
         base_prob = sum(signals[k] * weights[k] for k in weights)
@@ -574,9 +772,18 @@ class VideoAIAnalyzer:
         ai_probability = min(99.0, max(0.0, base_prob))
 
         # Confidence from signal agreement
-        signal_std = np.std(list(signals.values()))
-        strength = ai_probability if ai_probability > 50 else (100 - ai_probability)
-        confidence = max(40, min(98, strength * 0.7 + (100 - signal_std) * 0.3))
+        # More signals agreeing = higher confidence
+        active_signals = [v for v in signals.values() if v > 5]  # Ignore near-zero
+        if active_signals:
+            signal_std = np.std(active_signals)
+            signal_mean = np.mean(active_signals)
+            # Agreement factor: low spread among active signals = high confidence
+            agreement = max(0, 100 - signal_std * 1.5)
+            # Strength factor: how far from 50% the probability is
+            strength = abs(ai_probability - 50) * 2
+            confidence = max(30, min(98, agreement * 0.4 + strength * 0.6))
+        else:
+            confidence = 20.0  # No meaningful signals
 
         result = {
             'ai_probability': round(ai_probability, 1),
@@ -601,6 +808,9 @@ class VideoAIAnalyzer:
             'color_anomaly': ("Abnormal color distribution detected", 55),
             'temporal_coherence': ("Unnatural motion between frames", 55),
             'edge_artifacts': ("AI-generation boundary artifacts visible", 55),
+            'watermark_artifacts': ("Hidden watermark/steganographic patterns detected", 50),
+            'ela_analysis': ("Uniform error levels indicate synthetic generation", 50),
+            'metadata_forensics': ("Noise floor inconsistent with camera sensor", 50),
         }
         for key, (desc, thresh) in thresholds.items():
             if signals.get(key, 0) > thresh:
